@@ -3,24 +3,27 @@
 import datetime
 import os
 import sys
+import math
 
 from atlassian import Jira
 
-DEFAULT_JQL = f"status = done and updated >= startOfDay(-28) and type in (bug, story)"
+DEFAULT_JQL = f"status = done and updated >= startOfDay(-56) and type in (bug, story)"
 
 
 class FlowItem:
-    def __init__(self, key, assignee, project, events) -> None:
+    def __init__(self, key, assignee, project, events, story_point_estimate) -> None:
         super().__init__()
         self.key = key
         self.assignee = assignee
         self.project = project
+        self.story_point_estimate = story_point_estimate if story_point_estimate else math.nan
         self.events = sorted(events, key=lambda e: e.timestamp)
 
     @staticmethod
     def from_issue(issue, changes):
         return FlowItem(
             key=issue['key'], assignee=get_assignee_safely(issue), project=issue['fields']['project']['name'],
+            story_point_estimate=issue['fields']['customfield_11020'],
             events=[
                 FlowEvent.from_history(h, i) for h in changes['histories'] for i in h['items'] if i['field'] == 'status'
             ]
@@ -48,7 +51,7 @@ class FlowItem:
         departure = self.departure()
         journey = '->'.join([self.events[0].from_status] + [e.to_status for e in self.events])
         if arrival and departure:
-            cycle_time = float((departure - arrival).days * 86440 + (departure - arrival).days)/86440
+            cycle_time = float((departure - arrival).days * 86440 + (departure - arrival).seconds)/86440
             cycle_time_breakdown = self.get_cycle_time_breakdown()
             in_progress_cycle_time = float(cycle_time_breakdown.get('In Progress', 0))/86400
             in_review_cycle_time = float(cycle_time_breakdown.get('In Review', 0))/86400
@@ -56,11 +59,11 @@ class FlowItem:
             in_qa_cycle_time = float(cycle_time_breakdown.get('IN QA', 0))/86400
             print(
                 f"{self.key},{self.project},{self.assignee},{arrival:%Y-%m-%d},{departure:%Y-%m-%d},"
-                f"{cycle_time:.1f},{in_progress_cycle_time:.1f},{in_review_cycle_time:.1f},"
-                f"{ready_for_qa_cycle_time:.1f},{in_qa_cycle_time:.1f},{journey}"
+                f"{self.story_point_estimate:.1f},{cycle_time:.1f},{in_progress_cycle_time:.1f},"
+                f"{in_review_cycle_time:.1f},{ready_for_qa_cycle_time:.1f},{in_qa_cycle_time:.1f},{journey}"
             )
         else:
-            print(f"{self.key},{self.project},{self.assignee},,,,,,,,{journey}")
+            print(f"{self.key},{self.project},{self.assignee},,,,,,,,,{journey}")
 
 
 class FlowEvent:
@@ -91,11 +94,14 @@ if __name__ == '__main__':
         start_at = 0
         while True:
             print(f"Using query '{jql}', from position {start_at} ...", file=sys.stderr)
-            found = jira.jql(jql=jql, fields='assignee,project', limit=100, start=start_at)
+            found = jira.jql(jql=jql, fields='assignee,project,customfield_11020', limit=100, start=start_at)
             total = found.get('total', 0)
             print(f"Got {len(found['issues'])} out of {total} issues. Processing ...", file=sys.stderr)
             items += [i for i in [FlowItem.from_issue(i, jira.get_issue_changelog(i['key'])) for i in found['issues']]]
             if start_at + len(found['issues']) >= total: break
             start_at += len(found['issues'])
-        print("Item,Project,Assignee,Arrival,Departure,CT,In Progress CT,In Review CT,Ready for QA CT,In QA CT,Journey")
+        print(
+            "Item,Project,Assignee,Arrival,Departure,SP Estimate,"
+            "CT,In Progress CT,In Review CT,Ready for QA CT,In QA CT,Journey"
+        )
         [i.to_csv() for i in items]
